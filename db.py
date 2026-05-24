@@ -4,9 +4,18 @@ import pandas as pd
 from datetime import date, datetime, timedelta
 import json
 
+# Hardcoded fallback — used if Streamlit secrets fail to parse correctly
+_SUPABASE_URL = "https://pqhipbnjkbhlguvrjcah.supabase.co"
+_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxaGlwYm5qa2JobGd1dnJqY2FoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MTY3NzM5OSwiZXhwIjoyMDg3MjUzMzk5fQ.UTLaTxb0YNVrRXE28uSaGOv4OKd_zBwcgXa7KVzWgso"
+
 @st.cache_resource
 def get_client():
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_SERVICE_KEY"])
+    try:
+        url = st.secrets.get("SUPABASE_URL", _SUPABASE_URL)
+        key = st.secrets.get("SUPABASE_SERVICE_KEY", _SUPABASE_KEY)
+    except Exception:
+        url, key = _SUPABASE_URL, _SUPABASE_KEY
+    return create_client(url, key)
 
 def sb(): return get_client()
 
@@ -80,7 +89,14 @@ def save_positions_snapshot(positions):
     if positions: sb().table("tl_positions").insert(positions).execute()
 
 def get_latest_positions():
-    r = (sb().table("tl_positions").select("*").eq("is_latest", True).order("unrealized_pnl", desc=True).execute())
+    r = sb().table("tl_positions").select("*").eq("is_latest", True).order("unrealized_pnl", desc=True).execute()
+    return pd.DataFrame(r.data) if r.data else pd.DataFrame()
+
+def get_positions_history(instrument=None, days=30):
+    start = str(date.today() - timedelta(days=days))
+    q = sb().table("tl_positions").select("*").gte("snapshot_date", start)
+    if instrument: q = q.ilike("instrument", f"%{instrument}%")
+    r = q.order("snapshot_date", desc=True).execute()
     return pd.DataFrame(r.data) if r.data else pd.DataFrame()
 
 def get_playbook(active_only=True):
@@ -96,6 +112,19 @@ def add_rule(rule):
 def update_rule(rule_id, data):
     data["updated_at"] = datetime.utcnow().isoformat()
     return sb().table("tl_playbook").update(data).eq("rule_id", rule_id).execute()
+
+def record_rule_outcome(rule_id, followed, pnl_impact):
+    r = sb().table("tl_playbook").select("*").eq("rule_id", rule_id).execute()
+    if not r.data: return
+    rule = r.data[0]
+    update = {"times_tested": rule["times_tested"]+1, "updated_at": datetime.utcnow().isoformat()}
+    if followed:
+        update["times_followed"] = rule["times_followed"]+1
+        update["pnl_when_followed"] = (rule["pnl_when_followed"] or 0) + pnl_impact
+    else:
+        update["times_violated"] = rule["times_violated"]+1
+        update["pnl_when_violated"] = (rule["pnl_when_violated"] or 0) + pnl_impact
+    sb().table("tl_playbook").update(update).eq("rule_id", rule_id).execute()
 
 def get_patterns(severity=None):
     q = sb().table("tl_patterns").select("*").eq("acknowledged", False)
@@ -130,15 +159,14 @@ def recompute_daily_metrics():
     df["net_pnl"] = pd.to_numeric(df["net_pnl"], errors="coerce").fillna(0)
     df["session_date"] = pd.to_datetime(df["session_date"]).dt.date
     closed = df[~df.get("is_open", pd.Series([False]*len(df))).fillna(False)]
-    wins = closed[closed["net_pnl"] > 0]
-    losses = closed[closed["net_pnl"] < 0]
+    wins = closed[closed["net_pnl"]>0]; losses = closed[closed["net_pnl"]<0]
     def wr(s): return round(len(s[s["net_pnl"]>0])/len(s),4) if len(s)>0 else None
     today_dt = date.today()
-    d7 = closed[closed["session_date"] >= today_dt - timedelta(days=7)]
-    d30 = closed[closed["session_date"] >= today_dt - timedelta(days=30)]
-    fy_start = date(2026,4,1) if today_dt >= date(2026,4,1) else date(2025,4,1)
-    fy = closed[closed["session_date"] >= fy_start]
-    td = closed[closed["session_date"] == today_dt]
+    d7 = closed[closed["session_date"]>=today_dt-timedelta(days=7)]
+    d30 = closed[closed["session_date"]>=today_dt-timedelta(days=30)]
+    fy_start = date(2026,4,1) if today_dt>=date(2026,4,1) else date(2025,4,1)
+    fy = closed[closed["session_date"]>=fy_start]
+    td = closed[closed["session_date"]==today_dt]
     aw = float(wins["net_pnl"].mean()) if len(wins)>0 else 0
     al = float(losses["net_pnl"].mean()) if len(losses)>0 else 0
     payoff = abs(aw/al) if al!=0 else None
@@ -152,12 +180,14 @@ def recompute_daily_metrics():
             else: break
     seg_pnl = closed.groupby("segment")["net_pnl"].sum().to_dict() if "segment" in closed.columns else {}
     metrics = {
-        "metric_date": today, "total_trades_td": len(td), "winning_trades_td": len(td[td["net_pnl"]>0]),
-        "losing_trades_td": len(td[td["net_pnl"]<0]), "win_rate_7d": wr(d7), "win_rate_30d": wr(d30),
-        "win_rate_alltime": wr(closed), "pnl_td": float(td["net_pnl"].sum()), "pnl_7d": float(d7["net_pnl"].sum()),
+        "metric_date": today, "total_trades_td": len(td),
+        "winning_trades_td": len(td[td["net_pnl"]>0]), "losing_trades_td": len(td[td["net_pnl"]<0]),
+        "win_rate_7d": wr(d7), "win_rate_30d": wr(d30), "win_rate_alltime": wr(closed),
+        "pnl_td": float(td["net_pnl"].sum()), "pnl_7d": float(d7["net_pnl"].sum()),
         "pnl_30d": float(d30["net_pnl"].sum()), "pnl_fy": float(fy["net_pnl"].sum()),
         "pnl_alltime": float(closed["net_pnl"].sum()), "cumulative_pnl": float(closed["net_pnl"].sum()),
-        "avg_win": aw, "avg_loss": al, "payoff_ratio": payoff, "streak_current": streak, "streak_type": stype,
+        "avg_win": aw, "avg_loss": al, "payoff_ratio": payoff,
+        "streak_current": streak, "streak_type": stype,
         "pnl_by_segment": json.dumps(seg_pnl), "updated_at": datetime.utcnow().isoformat(),
     }
     sb().table("tl_daily_metrics").upsert(metrics, on_conflict="metric_date").execute()
