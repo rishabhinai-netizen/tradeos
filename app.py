@@ -19,6 +19,7 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif;}
 .sec{font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:#888;margin:1.5rem 0 .75rem;padding-bottom:6px;border-bottom:1px solid #E8E6E1;}
 .alert-w{background:#FFFBEB;border:1px solid #FDE68A;border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:13px;color:#92400E;}
 .alert-d{background:#FEF2F2;border:1px solid #FECACA;border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:13px;color:#991B1B;}
+.empty-state{background:#F9F8F6;border:1px dashed #D4D0C8;border-radius:12px;padding:2rem;text-align:center;color:#888;}
 </style>""", unsafe_allow_html=True)
 
 with st.sidebar:
@@ -40,9 +41,21 @@ today = date.today()
 st.markdown(f"## Live Cockpit")
 st.caption(f"{today.strftime('%A, %d %B %Y')} · {datetime.now().strftime('%H:%M')}")
 
-positions_df = db.get_latest_positions()
-metrics = db.get_latest_metrics()
-patterns_df = db.get_patterns()
+# --- Safe DB calls — never crash on startup ---
+try:
+    positions_df = db.get_latest_positions()
+except Exception:
+    positions_df = pd.DataFrame()
+
+try:
+    metrics = db.get_latest_metrics()
+except Exception:
+    metrics = None
+
+try:
+    patterns_df = db.get_patterns()
+except Exception:
+    patterns_df = pd.DataFrame()
 
 # Alerts
 if not positions_df.empty and "days_to_expiry" in positions_df.columns:
@@ -51,7 +64,7 @@ if not positions_df.empty and "days_to_expiry" in positions_df.columns:
         dte = int(p["days_to_expiry"]); pnl = float(p.get("unrealized_pnl",0) or 0)
         label = "TODAY" if dte==0 else "TOMORROW"
         cls = "alert-d" if dte<=1 else "alert-w"
-        st.markdown(f'<div class="{cls}">⚠️ <strong>{p.get("display_name","")}</strong> expires {label} · P&L: {"+" if pnl>=0 else ""}₹{abs(pnl):,.0f}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="{cls}">⚠️ <strong>{p.get("display_name","")}</strong> expires {label} · P&L: {"+"}₹{abs(pnl):,.0f}</div>', unsafe_allow_html=True)
 
 if not patterns_df.empty:
     for _,pat in patterns_df[patterns_df["severity"]=="danger"].iterrows():
@@ -70,18 +83,18 @@ def fc(v): return "green" if v>=0 else "red"
 
 c1,c2,c3,c4,c5 = st.columns(5)
 mdata = [
-    ("Deployed",f"₹{total_invested:,.0f}","All positions",""),
-    ("Unrealized P&L",fp(total_unreal),f"{total_unreal/total_invested*100:.1f}%" if total_invested else "—",fc(total_unreal)),
-    ("Today's P&L",fp(pnl_td),"Net realized",fc(pnl_td)),
-    ("FY P&L",fp(pnl_fy),"Net realized",fc(pnl_fy)),
-    ("Win Rate 30d",f"{wr30*100:.1f}%" if wr30 else "—","Last 30 days",""),
+    ("Deployed", f"₹{total_invested:,.0f}", "All positions", ""),
+    ("Unrealized P&L", fp(total_unreal), f"{total_unreal/total_invested*100:.1f}%" if total_invested else "—", fc(total_unreal)),
+    ("Today's P&L", fp(pnl_td), "Net realized", fc(pnl_td)),
+    ("FY P&L", fp(pnl_fy), "Net realized", fc(pnl_fy)),
+    ("Win Rate 30d", f"{wr30*100:.1f}%" if wr30 else "—", "Last 30 days", ""),
 ]
 for col,(lbl,val,sub,color) in zip([c1,c2,c3,c4,c5],mdata):
     with col: st.markdown(f'<div class="mcard"><div class="mlabel">{lbl}</div><div class="mval {color}">{val}</div><div class="msub">{sub}</div></div>', unsafe_allow_html=True)
 
 # Positions
+st.markdown('<div class="sec">Open Positions</div>', unsafe_allow_html=True)
 if not positions_df.empty:
-    st.markdown('<div class="sec">Open Positions</div>', unsafe_allow_html=True)
     show = positions_df.copy()
     for c in ["invested_value","market_value","avg_cost","current_price"]:
         if c in show.columns: show[c] = pd.to_numeric(show[c],errors="coerce").apply(lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—")
@@ -94,7 +107,6 @@ if not positions_df.empty:
     disp = [c for c in ["display_name","segment","quantity","avg_cost","current_price","unrealized_pnl","unrealized_pnl_pct","days_to_expiry"] if c in show.columns]
     st.dataframe(show[disp].rename(columns={"display_name":"Instrument","unrealized_pnl":"P&L","unrealized_pnl_pct":"P&L %","days_to_expiry":"DTE","avg_cost":"Avg Cost","current_price":"LTP"}), use_container_width=True, hide_index=True)
 
-    # P&L bar
     chart = positions_df.copy()
     chart["unrealized_pnl"] = pd.to_numeric(chart["unrealized_pnl"],errors="coerce").fillna(0)
     chart["name"] = (chart.get("ticker",chart.get("display_name",""))).apply(lambda x: str(x)[:14])
@@ -107,8 +119,14 @@ if not positions_df.empty:
         xaxis=dict(showgrid=True,gridcolor="#F0EEE9",zeroline=True,zerolinecolor="#ccc"),
         yaxis=dict(showgrid=False), font=dict(family="DM Sans",size=12))
     st.plotly_chart(fig, use_container_width=True)
+else:
+    st.markdown('<div class="empty-state">📭 No positions yet.<br><span style="font-size:13px">Import your holdings CSV via the <strong>Journal</strong> page to see positions here.</span></div>', unsafe_allow_html=True)
 
-pending = db.get_trades(debrief_pending=True, limit=5)
-if not pending.empty:
-    st.markdown('<div class="sec">Pending Debriefs</div>', unsafe_allow_html=True)
-    st.warning(f"**{len(pending)}** trade(s) waiting for journal debrief.")
+# Pending debriefs
+try:
+    pending = db.get_trades(debrief_pending=True, limit=5)
+    if not pending.empty:
+        st.markdown('<div class="sec">Pending Debriefs</div>', unsafe_allow_html=True)
+        st.warning(f"**{len(pending)}** trade(s) waiting for journal debrief.")
+except Exception:
+    pass
