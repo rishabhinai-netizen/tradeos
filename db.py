@@ -4,19 +4,22 @@ import pandas as pd
 from datetime import date, datetime, timedelta
 import json
 
-_SUPABASE_URL = "https://pqhipbnjkbhlguvrjcah.supabase.co"
-_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxaGlwYm5qa2JobGd1dnJqY2FoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MTY3NzM5OSwiZXhwIjoyMDg3MjUzMzk5fQ.UTLaTxb0YNVrRXE28uSaGOv4OKd_zBwcgXa7KVzWgso"
+_URL = "https://pqhipbnjkbhlguvrjcah.supabase.co"
+_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxaGlwYm5qa2JobGd1dnJqY2FoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MTY3NzM5OSwiZXhwIjoyMDg3MjUzMzk5fQ.UTLaTxb0YNVrRXE28uSaGOv4OKd_zBwcgXa7KVzWgso"
 
-@st.cache_resource
-def get_client():
-    try:
-        url = st.secrets.get("SUPABASE_URL", _SUPABASE_URL)
-        key = st.secrets.get("SUPABASE_SERVICE_KEY", _SUPABASE_KEY)
-    except Exception:
-        url, key = _SUPABASE_URL, _SUPABASE_KEY
-    return create_client(url, key)
+# Module-level singleton — avoids st.cache_resource caching failures
+_client = None
 
-def sb(): return get_client()
+def sb():
+    global _client
+    if _client is None:
+        # st.secrets access can KeyError if key not set — never trust .get()
+        try: url = st.secrets["SUPABASE_URL"]
+        except Exception: url = _URL
+        try: key = st.secrets["SUPABASE_SERVICE_KEY"]
+        except Exception: key = _KEY
+        _client = create_client(url, key)
+    return _client
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
 def get_or_create_session(session_date):
@@ -30,22 +33,13 @@ def get_or_create_session(session_date):
 
 def update_session(session_id, data):
     try:
-        data["updated_at"] = datetime.utcnow().isoformat()
-        # Map app fields to actual schema columns
-        mapped = {}
-        field_map = {
-            "market_bias": "market_bias", "max_loss_limit": "max_loss_limit",
-            "mental_state": "mental_state", "session_quality": "session_quality",
-            "loss_limit_respected": "loss_limit_respected", "loss_limit_breach_amt": "loss_limit_breach_amt",
-            "personal_context": "personal_context", "session_complete": "session_complete",
-            "total_trades": "total_trades", "total_pnl_net": "total_pnl_net",
-            "total_charges": "total_charges", "updated_at": "updated_at",
-            "eod_notes": "eod_notes", "total_pnl_gross": "total_pnl_gross",
-        }
-        for k, v in data.items():
-            col = field_map.get(k, k)
-            mapped[col] = v
-        return sb().table("tl_sessions").update(mapped).eq("session_id", session_id).execute()
+        allowed = {"market_bias","max_loss_limit","mental_state","session_quality",
+                   "loss_limit_respected","loss_limit_breach_amt","personal_context",
+                   "session_complete","total_trades","total_pnl_net","total_pnl_gross",
+                   "total_charges","total_stt","eod_notes","updated_at"}
+        clean = {k:v for k,v in data.items() if k in allowed}
+        clean["updated_at"] = datetime.utcnow().isoformat()
+        return sb().table("tl_sessions").update(clean).eq("session_id", str(session_id)).execute()
     except Exception:
         return None
 
@@ -66,14 +60,13 @@ def get_session_by_date(d):
 # ── Trades ────────────────────────────────────────────────────────────────────
 def upsert_trade(trade):
     try:
-        trade["updated_at"] = datetime.utcnow().isoformat()
-        # Remove any keys not in actual schema
         allowed = {"trade_id","session_id","session_date","instrument","display_name","isin",
                    "exchange","segment","expiry_date","buy_time","sell_time","holding_duration_mins",
                    "quantity","avg_buy_price","avg_sell_price","gross_pnl","brokerage","gst",
                    "misc_charges","stt","total_charges","net_pnl","trade_direction",
                    "kotak_order_ids","is_open","debrief_done","updated_at"}
-        clean = {k: v for k, v in trade.items() if k in allowed}
+        clean = {k:v for k,v in trade.items() if k in allowed}
+        clean["updated_at"] = datetime.utcnow().isoformat()
         r = sb().table("tl_trades").upsert(clean, on_conflict="trade_id").execute()
         return r.data[0] if r.data else {}
     except Exception:
@@ -94,8 +87,11 @@ def get_trades(session_date=None, limit=500, segment=None, instrument=None, debr
 def get_trades_daterange(start, end):
     try:
         r = (sb().table("tl_trades").select("*")
-             .gte("session_date", str(start)).lte("session_date", str(end))
-             .order("session_date", desc=False).order("created_at", desc=False).execute())
+             .gte("session_date", str(start))
+             .lte("session_date", str(end))
+             .order("session_date", desc=False)
+             .order("created_at", desc=False)
+             .execute())
         return pd.DataFrame(r.data) if r.data else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
@@ -147,7 +143,8 @@ def save_positions_snapshot(positions):
             p["snapshot_date"] = today
             p["snapshot_time"] = datetime.utcnow().isoformat()
             p["is_latest"] = True
-        if positions: sb().table("tl_positions").insert(positions).execute()
+        if positions:
+            sb().table("tl_positions").insert(positions).execute()
     except Exception:
         pass
 
@@ -252,7 +249,7 @@ def get_latest_metrics():
 def get_metrics_history(days=90):
     try:
         start = str(date.today() - timedelta(days=days))
-        r = sb().table("tl_daily_metrics").select("*").gte("metric_date", start).order("metric_date", desc=False).execute()
+        r = sb().table("tl_daily_metrics").select("*").gte("metric_date", start).order("metric_date").execute()
         return pd.DataFrame(r.data) if r.data else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
@@ -288,7 +285,8 @@ def recompute_daily_metrics():
         seg_pnl = closed.groupby("segment")["net_pnl"].sum().to_dict() if "segment" in closed.columns else {}
         metrics = {
             "metric_date": today,
-            "total_trades_td": len(td), "winning_trades_td": len(td[td["net_pnl"]>0]), "losing_trades_td": len(td[td["net_pnl"]<0]),
+            "total_trades_td": len(td), "winning_trades_td": len(td[td["net_pnl"]>0]),
+            "losing_trades_td": len(td[td["net_pnl"]<0]),
             "win_rate_7d": wr(d7), "win_rate_30d": wr(d30), "win_rate_alltime": wr(closed),
             "pnl_td": float(td["net_pnl"].sum()), "pnl_7d": float(d7["net_pnl"].sum()),
             "pnl_30d": float(d30["net_pnl"].sum()), "pnl_fy": float(fy["net_pnl"].sum()),
