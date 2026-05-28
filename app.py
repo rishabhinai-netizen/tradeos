@@ -33,6 +33,7 @@ with st.sidebar:
     st.page_link("pages/4_Pattern_Radar.py", label="🔍 Pattern Radar")
     st.page_link("pages/5_Playbook.py", label="📚 Playbook")
     st.page_link("pages/6_Weekly_Report.py", label="📆 Weekly Report")
+    st.page_link("pages/7_Position_Review.py", label="🔬 Position Review")
     st.divider()
     if st.button("🔄 Refresh", use_container_width=True):
         st.cache_data.clear(); st.rerun()
