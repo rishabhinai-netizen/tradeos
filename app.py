@@ -127,6 +127,6 @@ try:
     pending = db.get_trades(debrief_pending=True, limit=5)
     if not pending.empty:
         st.markdown('<div class="sec">Pending Debriefs</div>', unsafe_allow_html=True)
-        st.warning(f"**{len(pending)}** trade(s) waiting for journal debrief.")
+        st.warning(f"**{len(pending)}** trade(s) waiting for debrief. Say **'Journal Today'** to Claude — it asks all questions and pushes everything here automatically.")
 except Exception:
     pass

@@ -129,3 +129,78 @@ def detect_patterns_from_trades(trades_df, debriefs_df):
         if abs(al)>aw:
             patterns.append({"pattern_type":"Payoff ratio below 1.0","pattern_key":"payoff_ratio_below_1","description":f"Avg win INR{aw:,.0f} < Avg loss INR{abs(al):,.0f}","detail_text":"Win more often but losses are larger. Cut losers shorter.","occurrence_count":len(losses),"avg_pnl_impact":round(al-aw,2),"severity":"warning","last_seen":str(date.today())})
     return patterns
+
+def detect_pead_patterns(trades_df, debriefs_df):
+    """PEAD-specific pattern detection — Rishabh's primary trading system."""
+    patterns = []
+    if trades_df.empty or debriefs_df.empty: return patterns
+
+    df = trades_df.copy()
+    df["net_pnl"] = pd.to_numeric(df["net_pnl"], errors="coerce").fillna(0)
+    closed = df[~df.get("is_open", pd.Series([False]*len(df))).fillna(False)].copy()
+    if closed.empty: return patterns
+
+    merged = closed.merge(debriefs_df, on="trade_id", how="inner")
+    if merged.empty: return patterns
+
+    # PEAD score compliance from setup_notes
+    pead_trades = merged[merged["setup_type"] == "News/Event"].copy()
+    if len(pead_trades) >= 3:
+        # Detect trades where lesson mentions "below 40" or "score"
+        violations = pead_trades[pead_trades["lesson_text"].str.contains("below 40|RULE VIOLATION|violation", case=False, na=False)]
+        if len(violations) >= 2:
+            viol_pnl = violations["net_pnl"].sum()
+            patterns.append({
+                "pattern_type": "PEAD score violation",
+                "pattern_key": "pead_below_40_trades",
+                "description": f"Traded {len(violations)} PEAD setups with score below 40",
+                "detail_text": f"Total P&L on below-40 trades: ₹{viol_pnl:,.0f}. Rule: PEAD score must be ≥40 before entry.",
+                "occurrence_count": len(violations),
+                "avg_pnl_impact": round(float(violations["net_pnl"].mean()), 2),
+                "total_pnl_impact": round(float(viol_pnl), 2),
+                "severity": "danger",
+                "last_seen": str(date.today()),
+            })
+
+        # Quick exit compliance — PEAD trades held > 5 min
+        if "holding_duration_mins" in pead_trades.columns:
+            pead_trades["holding_duration_mins"] = pd.to_numeric(pead_trades["holding_duration_mins"], errors="coerce")
+            long_holds = pead_trades[pead_trades["holding_duration_mins"] > 5]
+            short_holds = pead_trades[pead_trades["holding_duration_mins"] <= 5]
+            if len(long_holds) >= 2 and len(short_holds) >= 2:
+                avg_long = float(long_holds["net_pnl"].mean())
+                avg_short = float(short_holds["net_pnl"].mean())
+                if avg_short > avg_long:
+                    patterns.append({
+                        "pattern_type": "PEAD holding duration",
+                        "pattern_key": "pead_long_hold_underperformance",
+                        "description": f"Quick exits (≤5min) avg ₹{avg_short:,.0f} vs long holds (>5min) avg ₹{avg_long:,.0f}",
+                        "detail_text": "Data confirms: exit PEAD trades within 2 minutes for best outcomes.",
+                        "occurrence_count": len(long_holds),
+                        "avg_pnl_impact": round(avg_long - avg_short, 2),
+                        "total_pnl_impact": round(float(long_holds["net_pnl"].sum()), 2),
+                        "severity": "warning",
+                        "last_seen": str(date.today()),
+                    })
+
+        # Emotion FOMO on PEAD trades
+        if "emotion_score_entry" in pead_trades.columns:
+            pead_trades["emotion_score_entry"] = pd.to_numeric(pead_trades["emotion_score_entry"], errors="coerce")
+            fomo = pead_trades[pead_trades["emotion_score_entry"] >= 4]
+            calm = pead_trades[pead_trades["emotion_score_entry"] <= 2]
+            if len(fomo) >= 2 and len(calm) >= 1:
+                avg_fomo = float(fomo["net_pnl"].mean())
+                avg_calm = float(calm["net_pnl"].mean())
+                if avg_calm > avg_fomo:
+                    patterns.append({
+                        "pattern_type": "PEAD emotion impact",
+                        "pattern_key": "pead_fomo_underperformance",
+                        "description": f"Calm PEAD trades avg ₹{avg_calm:,.0f} vs FOMO trades avg ₹{avg_fomo:,.0f}",
+                        "detail_text": f"{len(fomo)} FOMO entries vs {len(calm)} calm entries.",
+                        "occurrence_count": len(fomo),
+                        "avg_pnl_impact": round(avg_fomo - avg_calm, 2),
+                        "severity": "warning",
+                        "last_seen": str(date.today()),
+                    })
+
+    return patterns

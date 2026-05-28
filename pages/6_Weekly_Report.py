@@ -47,7 +47,7 @@ Generate a structured weekly report:
 Be direct, use rupee amounts. Reference known patterns (Gold reversal loop, payoff ratio). Write as a trusted advisor who watched every trade."""
         with st.spinner("Claude is analysing your week..."):
             try:
-                client=anthropic.Anthropic(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
+                client=anthropic.Anthropic(api_key=(lambda: (lambda k: k if k else "")(st.secrets["ANTHROPIC_API_KEY"]) if "ANTHROPIC_API_KEY" in st.secrets else "")())
                 resp=client.messages.create(model="claude-haiku-4-5-20251001",max_tokens=1500,system=sys,messages=[{"role":"user","content":f"Trading data:\n{json.dumps(ctx,indent=2)}\n\nGenerate my weekly report."}])
                 rt=resp.content[0].text
                 db.save_insight({"insight_type":"Weekly","week_start":str(ws),"title":f"Weekly Report — {ws.strftime('%d %b')} to {we.strftime('%d %b %Y')}","insight_text":rt,"data_snapshot":json.dumps(ctx)})
